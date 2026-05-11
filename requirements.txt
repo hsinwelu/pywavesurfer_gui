@@ -1,0 +1,14 @@
+# Core dependencies for PyWaveSurfer GUI (Qt)
+# Requires: Python == 3.10
+# Platform-independent requirements
+
+numpy>=1.24.0
+matplotlib>=3.7.0
+PyQt6>=6.4.0
+pywavesurfer>=0.0.9
+h5py>=3.8.0
+
+# Note for Linux users: 
+# You may need system-level X11/Wayland libraries (e.g., libxcb).
+# Note for MacOS/Windows users:
+# PyQt6 includes the necessary binaries.

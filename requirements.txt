@@ -3,6 +3,7 @@
 # Platform-independent requirements
 
 numpy>=1.24.0
+scipy>=1.10.0
 matplotlib>=3.7.0
 PyQt6>=6.4.0
 pywavesurfer>=0.0.9

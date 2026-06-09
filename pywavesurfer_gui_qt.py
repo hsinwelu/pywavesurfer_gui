@@ -239,7 +239,7 @@ class WaveSurferQtPlotter(QMainWindow):
         self.lp_cutoff = QDoubleSpinBox()
         self.lp_cutoff.setRange(0.01, 1e6)
         self.lp_cutoff.setDecimals(2)
-        self.lp_cutoff.setValue(2000.0)
+        self.lp_cutoff.setValue(5000.0)
         lp_row.addWidget(self.lp_cutoff)
         lp_layout.addLayout(lp_row)
         layout.addWidget(lp_group)

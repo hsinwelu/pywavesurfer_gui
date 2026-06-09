@@ -8,11 +8,12 @@ from matplotlib.figure import Figure
 from matplotlib.backend_bases import key_press_handler
 
 from PyQt6.QtWidgets import (
-    QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, 
+    QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
     QPushButton, QListWidget, QLabel, QFileDialog, QMessageBox, QSplitter,
-    QComboBox, QTableWidget, QTableWidgetItem, QHeaderView
+    QComboBox, QTreeView, QDialog, QTreeWidget, QTreeWidgetItem
 )
-from PyQt6.QtCore import Qt
+from PyQt6.QtCore import Qt, QSettings
+from PyQt6.QtGui import QFileSystemModel
 
 from pywavesurfer import ws
 
@@ -30,19 +31,55 @@ class WaveSurferQtPlotter(QMainWindow):
 
         self.ds = None
         self.file_path = None
+        self._x_factor = 1.0
+        self.settings = QSettings("pywavesurfer_gui", "WaveSurferQtPlotter")
 
         # Main Layout
         central_widget = QWidget()
         self.setCentralWidget(central_widget)
         main_layout = QHBoxLayout(central_widget)
 
-        # Left Panel (Controls)
+        # Left Panel — vertical splitter: folder browser on top, controls below
         left_panel = QWidget()
-        left_layout = QVBoxLayout(left_panel)
-        
-        self.load_btn = QPushButton("Load .h5 File")
-        self.load_btn.clicked.connect(self.load_file)
-        left_layout.addWidget(self.load_btn)
+        left_outer = QVBoxLayout(left_panel)
+        left_outer.setContentsMargins(0, 0, 0, 0)
+        left_splitter = QSplitter(Qt.Orientation.Vertical)
+        left_outer.addWidget(left_splitter)
+
+        # Folder browser
+        browser = QWidget()
+        browser_layout = QVBoxLayout(browser)
+
+        folder_row = QHBoxLayout()
+        self.folder_btn = QPushButton("Choose Folder")
+        self.folder_btn.clicked.connect(self.choose_folder)
+        folder_row.addWidget(self.folder_btn)
+
+        self.up_btn = QPushButton("↑ Up")
+        self.up_btn.clicked.connect(self.go_up_folder)
+        folder_row.addWidget(self.up_btn)
+        browser_layout.addLayout(folder_row)
+
+        self.folder_label = QLabel("No folder selected")
+        self.folder_label.setWordWrap(True)
+        browser_layout.addWidget(self.folder_label)
+
+        self.fs_model = QFileSystemModel()
+        self.fs_model.setNameFilters(["*.h5"])
+        self.fs_model.setNameFilterDisables(False)
+
+        self.file_tree = QTreeView()
+        self.file_tree.setModel(self.fs_model)
+        for col in range(1, 4):
+            self.file_tree.hideColumn(col)
+        self.file_tree.setHeaderHidden(True)
+        self.file_tree.clicked.connect(self.on_tree_clicked)
+        self.file_tree.doubleClicked.connect(self.on_tree_double_clicked)
+        browser_layout.addWidget(self.file_tree)
+
+        # Controls (existing widgets live here)
+        controls = QWidget()
+        left_layout = QVBoxLayout(controls)
 
         self.file_label = QLabel("No file loaded")
         self.file_label.setWordWrap(True)
@@ -50,33 +87,30 @@ class WaveSurferQtPlotter(QMainWindow):
 
         left_layout.addWidget(QLabel("Select a sweep:"))
         self.sweep_listbox = QListWidget()
-        self.sweep_listbox.itemSelectionChanged.connect(self.on_selection_changed)
+        self.sweep_listbox.itemClicked.connect(self.plot_selected)
         self.sweep_listbox.itemDoubleClicked.connect(self.plot_selected)
         left_layout.addWidget(self.sweep_listbox)
 
-        self.plot_btn = QPushButton("Plot Selected Sweep")
-        self.plot_btn.setEnabled(False)
-        self.plot_btn.clicked.connect(self.plot_selected)
-        left_layout.addWidget(self.plot_btn)
-
-        # Metadata Table
-        left_layout.addWidget(QLabel("File Metadata (Header):"))
-        self.meta_table = QTableWidget()
-        self.meta_table.setColumnCount(2)
-        self.meta_table.setHorizontalHeaderLabels(["Property", "Value"])
-        self.meta_table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
-        self.meta_table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
-        self.meta_table.cellDoubleClicked.connect(self.show_meta_detail)
-        left_layout.addWidget(self.meta_table)
+        # Metadata
+        self.meta_btn = QPushButton("Show File Metadata")
+        self.meta_btn.setEnabled(False)
+        self.meta_btn.clicked.connect(self.show_metadata_window)
+        left_layout.addWidget(self.meta_btn)
+        self._meta_dialog = None
 
         # Unit Toggle
         left_layout.addWidget(QLabel("X-Axis Unit:"))
         self.unit_combo = QComboBox()
         self.unit_combo.addItems(["Seconds (s)", "Milliseconds (ms)"])
-        self.unit_combo.currentIndexChanged.connect(self.plot_selected)
+        self.unit_combo.currentIndexChanged.connect(self.change_units)
         left_layout.addWidget(self.unit_combo)
 
         left_layout.addStretch() # Push everything up
+
+        left_splitter.addWidget(browser)
+        left_splitter.addWidget(controls)
+        left_splitter.setStretchFactor(0, 1)
+        left_splitter.setStretchFactor(1, 2)
 
         # Right Panel (Plot)
         right_panel = QWidget()
@@ -102,77 +136,162 @@ class WaveSurferQtPlotter(QMainWindow):
         
         main_layout.addWidget(splitter)
 
-    def load_file(self):
-        file_path, _ = QFileDialog.getOpenFileName(self, "Open HDF5 File", "", "HDF5 files (*.h5)")
-        if not file_path:
-            return
+        # Restore last folder if available, otherwise default to home
+        last_dir = self.settings.value("last_folder", "")
+        if not last_dir or not os.path.isdir(last_dir):
+            last_dir = os.path.expanduser("~")
+        self._set_folder(last_dir)
 
+    def choose_folder(self):
+        start = self.settings.value("last_folder", os.path.expanduser("~"))
+        folder = QFileDialog.getExistingDirectory(self, "Choose Folder", start)
+        if folder:
+            self._set_folder(folder)
+
+    def go_up_folder(self):
+        current = self.settings.value("last_folder", os.path.expanduser("~"))
+        current = os.path.abspath(current)
+        parent = os.path.dirname(current)
+        if parent and parent != current and os.path.isdir(parent):
+            self._set_folder(parent)
+
+    def _set_folder(self, folder):
+        self.settings.setValue("last_folder", folder)
+        self.folder_label.setText(folder)
+        self.fs_model.setRootPath(folder)
+        self.file_tree.setRootIndex(self.fs_model.index(folder))
+
+    def on_tree_clicked(self, index):
+        path = self.fs_model.filePath(index)
+        if os.path.isfile(path) and path.lower().endswith(".h5"):
+            self._load_path(path)
+
+    def on_tree_double_clicked(self, index):
+        path = self.fs_model.filePath(index)
+        if os.path.isdir(path):
+            self._set_folder(path)
+
+    def _load_path(self, file_path):
         try:
             self.ds = ws.loadDataFile(file_path)
             self.file_path = file_path
             self.file_label.setText(os.path.basename(file_path))
-            
+
             # Populate listbox with sweeps
             self.sweep_listbox.clear()
             sweeps = sorted([k for k in self.ds.keys() if k.startswith('sweep')])
             self.sweep_listbox.addItems(sweeps)
-            
-            # Populate metadata table
-            self.populate_metadata()
-            
-            if not sweeps:
+
+            # Metadata is shown on-demand via the dialog
+            self.meta_btn.setEnabled('header' in self.ds)
+            if self._meta_dialog is not None and self._meta_dialog.isVisible():
+                self._populate_meta_tree(self._meta_dialog.findChild(QTreeWidget))
+
+            if sweeps:
+                self.sweep_listbox.setCurrentRow(0)
+                self.plot_sweep(sweeps[0])
+            else:
                 QMessageBox.information(self, "Info", "No sweeps found in this file.")
         except Exception as e:
             QMessageBox.critical(self, "Error", f"Failed to load file:\n{str(e)}")
 
-    def populate_metadata(self):
-        """Extracts and flattens header data to show in the table."""
-        self.meta_table.setRowCount(0)
+    def _clean_value(self, v):
+        """Convert bytes to string and handle lists/arrays for readability."""
+        if isinstance(v, bytes):
+            return v.decode('utf-8', errors='replace')
+        if isinstance(v, (list, np.ndarray)):
+            cleaned = [self._clean_value(i) for i in v]
+            if len(cleaned) == 1:
+                return str(cleaned[0])
+            return str(cleaned)
+        return str(v)
+
+    def show_metadata_window(self):
+        """Open a separate window displaying the header as a tree."""
         if not self.ds or 'header' not in self.ds:
             return
 
-        header = self.ds['header']
-        
-        def clean_value(v):
-            """Convert bytes to string and handle lists/arrays for readability."""
-            if isinstance(v, bytes):
-                return v.decode('utf-8', errors='replace')
-            if isinstance(v, (list, np.ndarray)):
-                # If it's a list/array of bytes, clean each item
-                cleaned_list = [clean_value(i) for i in v]
-                if len(cleaned_list) == 1:
-                    return str(cleaned_list[0])
-                return str(cleaned_list)
-            return str(v)
+        if self._meta_dialog is None:
+            dialog = QDialog(self)
+            dialog.setWindowTitle("File Metadata (Header)")
+            dialog.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose)
+            dialog.resize(600, 500)
+            layout = QVBoxLayout(dialog)
 
-        def flatten(d, parent_key=''):
-            items = []
-            if isinstance(d, dict):
-                for k, v in d.items():
-                    new_key = f"{parent_key}.{k}" if parent_key else k
-                    items.extend(flatten(v, new_key))
+            tree = QTreeWidget()
+            tree.setColumnCount(2)
+            tree.setHeaderLabels(["Property", "Value"])
+            tree.itemDoubleClicked.connect(self._show_meta_leaf_detail)
+            layout.addWidget(tree)
+
+            dialog.destroyed.connect(self._on_meta_dialog_closed)
+            self._meta_dialog = dialog
+
+        self._populate_meta_tree(self._meta_dialog.findChild(QTreeWidget))
+        self._meta_dialog.show()
+        self._meta_dialog.raise_()
+        self._meta_dialog.activateWindow()
+
+    def _on_meta_dialog_closed(self, _obj=None):
+        self._meta_dialog = None
+
+    def _populate_meta_tree(self, tree):
+        if tree is None or not self.ds or 'header' not in self.ds:
+            return
+        tree.clear()
+        self._add_meta_items(tree, self.ds['header'])
+        tree.expandToDepth(0)
+        tree.resizeColumnToContents(0)
+
+    def _add_meta_items(self, parent, data):
+        """Recursively add header keys/values as QTreeWidgetItems."""
+        if not isinstance(data, dict):
+            return
+        for k, v in data.items():
+            item = QTreeWidgetItem(parent, [str(k), ""])
+            if isinstance(v, dict):
+                self._add_meta_items(item, v)
             else:
-                items.append((parent_key, clean_value(d)))
-            return items
+                item.setText(1, self._clean_value(v))
 
-        flat_header = flatten(header)
-        
-        self.meta_table.setRowCount(len(flat_header))
-        for row, (key, value) in enumerate(flat_header):
-            self.meta_table.setItem(row, 0, QTableWidgetItem(key))
-            self.meta_table.setItem(row, 1, QTableWidgetItem(value))
+    def _show_meta_leaf_detail(self, item, _column):
+        """Pop a detail box for leaf nodes with potentially long values."""
+        if item.childCount() > 0:
+            return
+        # Reconstruct dotted path from ancestors
+        path_parts = []
+        node = item
+        while node is not None:
+            path_parts.append(node.text(0))
+            node = node.parent()
+        path = ".".join(reversed(path_parts))
+        QMessageBox.information(self, "Metadata Detail",
+                                f"<b>Property:</b> {path}<br><br>"
+                                f"<b>Value:</b> {item.text(1)}")
 
-    def show_meta_detail(self, row, column):
-        """Shows a popup with the full text of the selected metadata."""
-        key_item = self.meta_table.item(row, 0)
-        val_item = self.meta_table.item(row, 1)
-        if key_item and val_item:
-            QMessageBox.information(self, "Metadata Detail", 
-                                    f"<b>Property:</b> {key_item.text()}<br><br>"
-                                    f"<b>Value:</b> {val_item.text()}")
+    def change_units(self):
+        """Rescale x-data and xlim in place so zoom/pan is preserved."""
+        if not self.canvas.fig.axes:
+            return
+        is_ms = self.unit_combo.currentIndex() == 1
+        new_factor = 1000.0 if is_ms else 1.0
+        if new_factor == self._x_factor:
+            return
+        scale = new_factor / self._x_factor
 
-    def on_selection_changed(self):
-        self.plot_btn.setEnabled(len(self.sweep_listbox.selectedItems()) > 0)
+        for ax in self.canvas.fig.axes:
+            for line in ax.get_lines():
+                line.set_xdata(line.get_xdata() * scale)
+            xmin, xmax = ax.get_xlim()
+            ax.set_xlim(xmin * scale, xmax * scale)
+
+        self.canvas.fig.axes[-1].set_xlabel("Time (ms)" if is_ms else "Time (s)")
+        self._x_factor = new_factor
+
+        self.canvas.draw_idle()
+        # Refresh navigation history so 'Home' matches the rescaled view
+        self.toolbar.update()
+        self.toolbar.push_current()
 
     def plot_selected(self):
         selected_items = self.sweep_listbox.selectedItems()
@@ -222,8 +341,10 @@ class WaveSurferQtPlotter(QMainWindow):
             if is_ms:
                 time = time * 1000
                 unit_label = "Time (ms)"
+                self._x_factor = 1000.0
             else:
                 unit_label = "Time (s)"
+                self._x_factor = 1.0
 
             # Clear previous figure content
             self.canvas.fig.clear()
